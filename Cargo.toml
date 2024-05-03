@@ -10,3 +10,4 @@ homepage = "https://github.com/rory/rust-dbf"
 
 [dependencies]
 nom = "^2.0"
+thiserror = "1.0"

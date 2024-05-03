@@ -73,12 +73,30 @@ named!(parse_field_descriptor<FieldHeader>,
     )
 );
 
+#[derive(thiserror::Error, Debug)]
+enum ParseError {
+    #[error("utf8 error: `{0}`")]
+    Utf8Error(std::string::FromUtf8Error),
+    #[error("io error: `{0}`")]
+    IoError(std::io::Error),
+}
+
+type FnFromV8 = fn (vec: Vec<u8>) -> Result<String, ParseError>;
+
+fn from_utf8(vec: Vec<u8>) -> Result<String, ParseError> {
+    match String::from_utf8(vec) {
+        Ok(s) => Ok(s),
+        Err(e) => Err(ParseError::Utf8Error(e)),
+    }
+}
+
 #[derive(Debug)]
 pub struct DbfFile<R: Read+Seek> {
     _dbf_file_handle: R,
     _fields: Vec<FieldHeader>,
     _num_recs: u32,
     _bytes_in_rec: u16,
+    _from_v8: FnFromV8,
 }
 
 pub struct DbfRecordIterator<R: Read+Seek> {
@@ -125,13 +143,21 @@ pub type Record = HashMap<String, Field>;
 
 impl DbfFile<File> {
     pub fn open_file(filename: &Path) -> Self {
+        Self::open_file_with_encoding(filename, from_utf8)
+    }
+
+    pub fn open_file_with_encoding(filename: &Path, from_v8: FnFromV8) -> Self {
         let dbf_file = File::open(filename).unwrap();
-        DbfFile::open(dbf_file)
+        DbfFile::open_with_encoding(dbf_file, from_v8)
     }
 }
 
 impl<R> DbfFile<R> where R: Read+Seek {
     pub fn open(mut dbf_file: R) -> Self where R: Read+Seek {
+        Self::open_with_encoding(dbf_file, from_utf8)
+    }
+
+    pub fn open_with_encoding(mut dbf_file: R, from_v8: FnFromV8) -> Self where R: Read+Seek {
         let header_bytes = read_bytes(&mut dbf_file, 0, 32).unwrap();
         let (num_recs, bytes_in_header, bytes_in_rec) = parse_header(&header_bytes).to_result().unwrap();
         // -1 is for the \x0D separator
@@ -140,8 +166,9 @@ impl<R> DbfFile<R> where R: Read+Seek {
 
         let fields: Vec<_> = read_bytes(&mut dbf_file, 32, (num_headers*32) as usize).unwrap().chunks(32).map(|b| parse_field_descriptor(b).to_result().unwrap()).collect();
 
-        DbfFile{ _dbf_file_handle: dbf_file, _fields: fields, _num_recs: num_recs as u32, _bytes_in_rec: bytes_in_rec as u16 }
+        DbfFile{ _dbf_file_handle: dbf_file, _fields: fields, _num_recs: num_recs as u32, _bytes_in_rec: bytes_in_rec as u16, _from_v8: from_v8, }
     }
+
 
     pub fn record(&mut self, rec_id: u32) -> Option<Record> {
         if rec_id >= self._num_recs {
@@ -165,7 +192,7 @@ impl<R> DbfFile<R> where R: Read+Seek {
             let this_field_bytes: Vec<_> = bytes.iter().skip(offset).take(field.field_length as usize).map(|x| x.clone()).collect();
             offset = offset + field.field_length as usize;
 
-            let this_field_ascii = String::from_utf8(this_field_bytes).unwrap().trim().to_owned();
+            let this_field_ascii = (self._from_v8)(this_field_bytes).unwrap().trim().to_owned();
 
             // Is this field a Character
             // FIXME gotta be a better way to do this
